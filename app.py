@@ -1,53 +1,59 @@
+import base64
+import os
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-import requests
 
 app = Flask(__name__)
 
 @app.route('/iniciar-robo', methods=['POST'])
 def iniciar_robo():
     dados = request.json
+    empresa_id = dados.get('empresa_id')
     cnpj = dados.get('cnpj')
-    senha = dados.get('senha')
+    cert_base64 = dados.get('certificado_data')
+    cert_senha = dados.get('senha_certificado')
 
-    if not cnpj or not senha:
-        return jsonify({"erro": "CNPJ e senha são obrigatórios"}), 400
+    if Bird_not cert_base64:
+        return jsonify({"erro": "Certificado digital nao fornecido"}), 400
+
+    # Define um caminho temporário no servidor para criar o arquivo do certificado
+    caminho_pfx = f"/tmp/cert_{empresa_id}.pfx"
 
     try:
-        # Inicia o Playwright em modo Headless (invisível)
+        # Decodifica a string Base64 de volta para o arquivo binário .pfx
+        with open(caminho_pfx, "wb") as f:
+            f.write(base64.b64decode(cert_base64))
+
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
             
-            # --- INÍCIO DA AUTOMAÇÃO ---
-            # Aqui você adapta a lógica de navegação do vídeo do Mitsueda.
-            # Exemplo de acesso:
-            # page.goto("URL_DO_PORTAL_NACIONAL")
-            # page.fill("input[name='cnpj']", cnpj)
-            # page.fill("input[name='senha']", senha)
-            # page.click("button[type='submit']")
-            # ... lógica de esperar e baixar o XML ...
+            # AQUI ESTÁ O SEGREDO: Criamos o contexto injetando o certificado digital no navegador
+            context = browser.new_context(
+                client_certificates=[{
+                    "origin": "https://www.nfse.gov.br", # URL base do portal de login
+                    "pfxPath": caminho_pfx,
+                    "password": cert_senha
+                }]
+            )
             
-            # Simulando que você pegou o XML e guardou numa variável:
-            xml_baixado = "<xml>Conteudo da nota fiscal aqui</xml>" 
+            page = context.new_page()
             
-            # --- FIM DA AUTOMAÇÃO ---
-
-            # Envia o XML baixado para o seu InfinityFree salvar no banco
-            url_infinity = "http://SEU_DOMINIO.epizy.com/receber_notas.php"
-            requests.post(url_infinity, data={
-                "cnpj": cnpj,
-                "tipo": "emitida",
-                "xml_content": xml_baixado
-            })
-
+            # Quando a página abrir a tela de login por certificado, o Playwright
+            # vai responder automaticamente com as credenciais do arquivo .pfx
+            page.goto("https://www.nfse.gov.br/Perfil/Contribuinte/Login")
+            
+            # ... Lógica de clique no botão "Entrar com Certificado Digital" ...
+            # ... Restante do script de raspagem e download das notas ...
+            
             browser.close()
-            
-        return jsonify({"status": "sucesso", "mensagem": "Notas processadas."}), 200
+
+        # Remove o arquivo do certificado por questões de segurança após o uso
+        if os.path.exists(caminho_pfx):
+            os.remove(caminho_pfx)
+
+        return jsonify({"status": "sucesso"}), 200
 
     except Exception as e:
+        if os.path.exists(caminho_pfx):
+            os.remove(caminho_pfx)
         return jsonify({"erro": str(e)}), 500
-
-if __name__ == '__main__':
-    # Gunicorn cuidará da porta no Render
-    app.run(host='0.0.0.0', port=10000)
