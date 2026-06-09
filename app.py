@@ -13,7 +13,7 @@ def iniciar_robo():
     cert_base64 = dados.get('certificado_data')
     cert_senha = dados.get('senha_certificado')
 
-    if Bird_not cert_base64:
+    if not cert_base64:
         return jsonify({"erro": "Certificado digital nao fornecido"}), 400
 
     # Define um caminho temporário no servidor para criar o arquivo do certificado
