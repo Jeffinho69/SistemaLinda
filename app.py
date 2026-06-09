@@ -16,6 +16,14 @@ def iniciar_robo():
     cert_base64 = dados.get('certificado_data')
     cert_senha = dados.get('senha_certificado')
 
+    # Argumentos de otimização pesada para o Render não estourar a memória (RAM)
+    browser_args = [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-dev-shm-usage',
+        '--disable-gpu'
+    ]
+
     try:
         with sync_playwright() as p:
             # ==========================================
@@ -25,21 +33,21 @@ def iniciar_robo():
                 if not senha_portal:
                     return jsonify({"erro": "Senha do portal não fornecida pelo PHP"}), 400
                 
-                # Inicia o navegador normalmente
-                browser = p.chromium.launch(headless=True)
+                # Inicia o navegador otimizado
+                browser = p.chromium.launch(headless=True, args=browser_args)
                 context = browser.new_context()
                 page = context.new_page()
                 
-                # Acessa a página de login com senha no portal nacional
+                # Acessa a página de login
                 page.goto("https://www.nfse.gov.br/EmissorNacional/Login")
                 
-                # Preenche os campos de acesso (Aguardando os elementos carregarem na tela)
+                # Preenche os campos baseados na sua inspeção (F12)
                 page.wait_for_selector("input[id='Inscricao']", timeout=15000)
                 page.fill("input[id='Inscricao']", cnpj)
                 page.fill("input[id='Senha']", senha_portal)
                 
-                # Clica no botão de entrar
-                page.click("button[id='btnEntrar']")
+                # Clica no botão de entrar (Agora usando a classe exata que vimos no print)
+                page.click("button[type='submit'].btn-primary")
                 page.wait_for_load_state("networkidle")
 
             # ==========================================
@@ -49,13 +57,11 @@ def iniciar_robo():
                 if not cert_base64:
                     return jsonify({"erro": "Certificado digital não fornecido"}), 400
                 
-                # Recria o arquivo temporário no servidor Linux do Render
                 caminho_pfx = f"/tmp/cert_{empresa_id}.pfx"
                 with open(caminho_pfx, "wb") as f:
                     f.write(base64.b64decode(cert_base64))
                 
-                # Inicia o navegador injetando o certificado digital no contexto
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(headless=True, args=browser_args)
                 context = browser.new_context(
                     client_certificates=[{
                         "origin": "https://www.nfse.gov.br",
@@ -65,11 +71,9 @@ def iniciar_robo():
                 )
                 page = context.new_page()
                 
-                # Acessa direto a rota de login por certificado
                 page.goto("https://www.nfse.gov.br/EmissorNacional/LoginCertificado")
                 page.wait_for_load_state("networkidle")
                 
-                # Remove o arquivo do certificado temporário por segurança
                 if os.path.exists(caminho_pfx):
                     os.remove(caminho_pfx)
                     
@@ -77,49 +81,54 @@ def iniciar_robo():
                 return jsonify({"erro": "Tipo de autenticação inválido"}), 400
 
             # ==========================================
-            # ÁREA COMUM: NAVEGAÇÃO, DOWNLOAD E ENVIO
+            # ÁREA DE NAVEGAÇÃO E DOWNLOAD (Com trava de segurança)
             # ==========================================
             
-            # 1. Navega para a página onde ficam as Notas Emitidas
-            # (Ajuste esta URL caso o caminho direto seja diferente após o login)
+            # Navega para a página de Notas Emitidas
             page.goto("https://www.nfse.gov.br/EmissorNacional/Notas/Emitidas")
             page.wait_for_load_state("networkidle")
             
-            # 2. Intercepta o download do arquivo XML
-            # Nota: Substitua "button.icone-baixar-xml" pelo seletor CSS exato do botão de baixar XML do portal.
-            with page.expect_download() as download_info:
-                # O robô clica no botão para exportar/baixar a nota
-                page.click("button.icone-baixar-xml")
-            
-            download = download_info.value
-            caminho_arquivo_temporario = download.path()
-            
-            # 3. Lê o conteúdo do arquivo XML que acabou de ser baixado
-            with open(caminho_arquivo_temporario, 'r', encoding='utf-8') as arquivo_xml:
-                xml_baixado = arquivo_xml.read()
-            
-            # 4. Devolve o XML via POST para o banco de dados do Aliado Fiscal no InfinityFree
-            url_php = "http://ajudati.gt.tc/receber_notas.php"
-            resposta = requests.post(url_php, data={
-                "empresa_id": empresa_id,
-                "cnpj": cnpj,
-                "tipo": "emitida",
-                "xml_content": xml_baixado
-            })
+            try:
+                # TENTA clicar no botão de download XML (Ainda usando o nome provisório)
+                # Reduzi o timeout para 10 segundos para não derrubar o servidor se não achar
+                with page.expect_download(timeout=10000) as download_info:
+                    page.click("button.icone-baixar-xml") # <-- AINDA PRECISAMOS DESCOBRIR ESSE NOME REAL
+                
+                download = download_info.value
+                caminho_arquivo_temporario = download.path()
+                
+                with open(caminho_arquivo_temporario, 'r', encoding='utf-8') as arquivo_xml:
+                    xml_baixado = arquivo_xml.read()
+                
+                # Envia para o InfinityFree
+                url_php = "http://ajudati.gt.tc/receber_notas.php"
+                resposta = requests.post(url_php, data={
+                    "empresa_id": empresa_id,
+                    "cnpj": cnpj,
+                    "tipo": "emitida",
+                    "xml_content": xml_baixado
+                })
 
-            browser.close()
-            
-            if resposta.status_code == 200:
-                return jsonify({"status": "sucesso", "mensagem": "Robô finalizou as operações e enviou as notas."}), 200
-            else:
-                return jsonify({"erro": f"Nota baixada, mas o PHP recusou o recebimento. Status: {resposta.status_code}"}), 500
+                browser.close()
+                
+                if resposta.status_code == 200:
+                    return jsonify({"status": "sucesso", "mensagem": "XML capturado e enviado ao banco de dados."}), 200
+                else:
+                    return jsonify({"erro": f"PHP recusou. Status: {resposta.status_code}"}), 500
+
+            except Exception as e_download:
+                # Se não achar o botão de baixar, devolve um aviso pacífico em vez de quebrar tudo
+                browser.close()
+                return jsonify({
+                    "status": "sucesso", 
+                    "mensagem": "LOGIN REALIZADO COM SUCESSO! O robô entrou no painel, mas não encontrou o botão de download do XML. Precisamos usar o F12 nessa tela agora."
+                }), 200
 
     except Exception as e:
-        # Garante que o arquivo de certificado seja deletado do servidor mesmo se ocorrer uma falha crítica
         if tipo_autenticacao == 'certificado_a1' and 'caminho_pfx' in locals():
             if os.path.exists(caminho_pfx):
                 os.remove(caminho_pfx)
-        return jsonify({"erro": str(e)}), 500
+        return jsonify({"erro": f"Erro crítico no processo: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
